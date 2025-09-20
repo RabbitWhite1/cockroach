@@ -47,7 +47,8 @@ type RawNode struct {
 // recommended that instead of calling Bootstrap, applications bootstrap their
 // state manually by setting up a Storage that has a first index > 1 and which
 // stores the desired ConfState as its InitialState.
-func NewRawNode(config *Config) (*RawNode, error) {
+func NewRawNode(config *Config, raftNotifyCh <-chan Notify) (*RawNode, error) {
+	config.WriteEnd = raftNotifyCh
 	r := newRaft(config)
 	rn := &RawNode{
 		raft: r,
@@ -243,10 +244,24 @@ func (rn *RawNode) needStorageAppend() bool {
 	// Return true if log entries, HardState, or a snapshot need to be written to
 	// stable storage. Also return true if any messages are contingent on all
 	// prior storage writes being durable.
+	// if raftconfig.AUTO_DECIDING_MESSAGE_SENDING {
+	// 	// In this mode, since we put all messages into r.msgs (instead of r.msgsAfterAppend),
+	// 	// we must make sure raftEvent records correct things:
+	// 	return true
+	// } else {
+	anyResp := false
+	for _, m := range r.msgs {
+		switch m.Type {
+		case pb.MsgAppResp, pb.MsgVoteResp, pb.MsgPreVoteResp, pb.MsgFortifyLeaderResp:
+			anyResp = true
+			break
+		}
+	}
 	return r.raftLog.hasNextUnstableEnts() ||
 		r.raftLog.hasNextUnstableSnapshot() ||
-		len(r.msgsAfterAppend) > 0 ||
+		len(r.msgsAfterAppend) > 0 || anyResp ||
 		!isHardStateEqual(r.hardState(), rn.prevHardSt)
+	// }
 }
 
 // sendStorageAppend creates the write request that is sent to the local
