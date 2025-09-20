@@ -2755,6 +2755,7 @@ GO_TARGETS = [
     "//pkg/util/queue:queue_test",
     "//pkg/util/quotapool:quotapool",
     "//pkg/util/quotapool:quotapool_test",
+    "//pkg/util/raftconfig:raftconfig",
     "//pkg/util/randident/randidentcfg:randidentcfg",
     "//pkg/util/randident:randident",
     "//pkg/util/randident:randident_test",

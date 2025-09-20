@@ -1,0 +1,13 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "raftconfig",
+    srcs = [
+        "raftconfig.go",
+    ],
+    importpath = "github.com/cockroachdb/cockroach/pkg/util/raftconfig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/util/envutil",
+    ],
+)

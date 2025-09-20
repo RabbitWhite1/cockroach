@@ -44,6 +44,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
+	"github.com/cockroachdb/cockroach/pkg/util/raftconfig"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
@@ -961,6 +962,7 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 		unquiesceAndWakeLeader := hasReady || numFlushed > 0 || len(r.mu.proposals) > 0
 		return unquiesceAndWakeLeader, nil
 	})
+
 	r.mu.applyingEntries = !ready.Committed.Empty()
 	pausedFollowers := r.mu.pausedFollowers
 	if shouldResetLastReplicaAdded {
@@ -985,6 +987,45 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 	raftEvent := rac2.RaftEventFromMsgStorageAppendAndMsgApps(
 		rac2ModeForReady, r.ReplicaID(), ready.StorageAppend, ready.Messages,
 		logSnapshot, r.raftMu.msgAppScratchForFlowControl, replicaStateInfoMap)
+	hasResp := false
+hasRespLoop:
+	for _, m := range ready.Messages {
+		switch m.Type {
+		case raftpb.MsgAppResp, raftpb.MsgVoteResp, raftpb.MsgPreVoteResp, raftpb.MsgFortifyLeaderResp:
+			hasResp = true
+			break hasRespLoop
+		}
+	}
+	if raftconfig.AUTO_DECIDING_MESSAGE_SENDING && hasReady {
+		if app := ready.StorageAppend; !app.Empty() || hasResp {
+			// We should only issue presistence if app is not empty.
+			// Another option is sending `app` regardlessly and let save thread decides (more similar to etcd one).
+			// BUT I AM LAZY.
+			// NOTE: Why do we need the responses?
+			// In logstore storeEntriesAndCommitBatch, it uses len(Responses) to decide if it must do sync,
+			// which further prevents calling into OnLogSync that updates repl.flowControlV2.SyncedLogStorage
+			// and AckAppend for updating with Ack.
+			// Note that the key difference is that we do not need to send the `responses` by the OnLogSync,
+			// instead, we just use it to let logstore know it must issue ack.
+			// Sending responses are done together with sending `ready.Messages`.
+			responses := []raftpb.Message{}
+			for _, m := range ready.Messages {
+				switch m.Type {
+				case raftpb.MsgAppResp, raftpb.MsgVoteResp, raftpb.MsgPreVoteResp, raftpb.MsgFortifyLeaderResp:
+					responses = append(responses, m)
+				}
+			}
+			app.Responses = responses
+			r.StatesCh <- Sync_Protocol_States{
+				StorageAppend: app,
+				// InSnap is required because CockroachDB stores snapshot real data in it, not in raftpb.Snapshot.
+				InSnap:    inSnap,
+				RaftEvent: raftEvent,
+				Stats:     &stats,
+			}
+		}
+	}
+
 	// The scratch map is used only while in this Ready handling call. Stop
 	// referencing the entry data from the content of this map, after the call is
 	// done. Not doing so could result in holding entry data for extended periods
@@ -1015,7 +1056,14 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 	}
 
 	r.traceMessageSends(ready.Messages, "sending messages")
-	r.sendRaftMessages(ctx, ready.Messages, pausedFollowers)
+	if raftconfig.AUTO_DECIDING_MESSAGE_SENDING {
+		for _, m := range ready.Messages {
+			r.raftsync.Send(m, RAFTSYNC_UNKNOWN)
+			r.sendRaftMessages(ctx, []raftpb.Message{m}, pausedFollowers)
+		}
+	} else {
+		r.sendRaftMessages(ctx, ready.Messages, pausedFollowers)
+	}
 
 	// Load the committed entries to be applied after releasing Replica.mu, to
 	// ensure that we don't have IO under this narrow/lightweight mutex. The
@@ -1047,8 +1095,8 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 	// to peers. However, the process of appending new entries to the raft log
 	// and then applying committed entries to the state machine can take some
 	// time - and these entries are already durably committed. If they have
-	// clients waiting on them, we'd like to acknowledge their success as soon
 	// as possible. To facilitate this, we take a quick pass over the committed
+	// clients waiting on them, we'd like to acknowledge their success as soon
 	// entries and acknowledge as many as we can trivially prove will not be
 	// rejected beneath raft.
 	//
@@ -1097,7 +1145,7 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 	refreshReason := noReason
 
 	state := r.asLogStorage().stateRaftMuLocked()
-	if app := ready.StorageAppend; !app.Empty() {
+	if app := ready.StorageAppend; !app.Empty() || hasResp {
 		cb := (*replicaSyncCallback)(r)
 
 		// Leadership changes, if any, are communicated through StorageAppend. Check
@@ -1120,7 +1168,15 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 			leaderID = roachpb.ReplicaID(hs.Lead)
 		}
 
-		if app.Snapshot != nil {
+		if raftconfig.AUTO_DECIDING_MESSAGE_SENDING {
+			// Under this mode, the processing has been sent. Meanwhile, message are delivered asynchronously above.
+			// Thus we should just wait here until the saving returns.
+			var notify = <-r.raftWriteEnd
+			state.LastIndex = kvpb.RaftIndex(notify.LastIndex)
+			state.LastTerm = kvpb.RaftTerm(notify.LastTerm)
+			state.ByteSize = notify.ByteSize
+			app.Responses = []raftpb.Message{} // We don't need it anyways, reset back to empty.
+		} else if app.Snapshot != nil {
 			shouldAssert = true
 			if inSnap.Desc == nil {
 				// If we didn't expect Raft to have a snapshot but it has one
@@ -1814,6 +1870,7 @@ func (r *Replica) sendRaftMessages(
 	var lastAppResp raftpb.Message
 	for _, message := range messages {
 		_, drop := blocked[roachpb.ReplicaID(message.To)]
+		// fmt.Printf("Trying to send (drop=%t) %+v\n", drop, message)
 		if drop {
 			r.store.Metrics().RaftPausedFollowerDroppedMsgs.Inc(1)
 		}
@@ -1891,8 +1948,12 @@ func (r *Replica) sendRaftMessages(
 
 // sendStorageAck sends a storage append ack to the local raft.RawNode.
 func (r *Replica) sendStorageAck(ctx context.Context, ack raft.StorageAppendAck, willDeliver bool) {
-	for msg := range ack.Send(raftpb.PeerID(r.replicaID)) {
-		r.sendRaftMessage(ctx, msg, false)
+	if raftconfig.AUTO_DECIDING_MESSAGE_SENDING {
+		// We will send messages from the main thread from `handleRaftReadyRaftMuLocked`, no need to send here.
+	} else {
+		for msg := range ack.Send(raftpb.PeerID(r.replicaID)) {
+			r.sendRaftMessage(ctx, msg, false)
+		}
 	}
 	r.localMsgs.Lock()
 	wasEmpty := len(r.localMsgs.active) == 0
@@ -1951,6 +2012,10 @@ func (r *Replica) deliverLocalRaftMsgsRaftMuLockedReplicaMuLocked(
 func (r *Replica) sendRaftMessage(
 	ctx context.Context, msg raftpb.Message, lowPriorityOverride bool,
 ) {
+	if raftconfig.AUTO_DECIDING_MESSAGE_SENDING {
+		// Intercept any sends. Note that even the MsgApp from RACv2 will invoke this from `SendMsgApp`.
+		// r.raftsync.Send(msg, RAFTSYNC_UNKNOWN)
+	}
 	lastToReplica, lastFromReplica := r.getLastReplicaDescriptors()
 
 	r.mu.RLock()
@@ -2052,6 +2117,7 @@ func (r *Replica) sendRaftMessageRequest(
 	if log.V(4) {
 		log.Dev.Infof(ctx, "sending raft request %+v", req)
 	}
+	// fmt.Printf("Really sending %+v\n", req.Message)
 	return r.store.cfg.Transport.SendAsync(req, r.connectionClass.get())
 }
 

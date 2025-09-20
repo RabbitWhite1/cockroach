@@ -33,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/raftconfig"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
@@ -363,6 +364,16 @@ func (r *Replica) initRaftMuLockedReplicaMuLocked(
 // initRaftGroupRaftMuLockedReplicaMuLocked initializes a Raft group for the
 // replica, replacing the existing Raft group if any.
 func (r *Replica) initRaftGroupRaftMuLockedReplicaMuLocked() error {
+	raftStatesChan := make(chan Sync_Protocol_States, 1)
+	raftWriteEnd := make(chan raft.Notify, 1)
+	if raftconfig.AUTO_DECIDING_MESSAGE_SENDING {
+		r.raftsync.Init(r, raftStatesChan, []chan raft.Notify{raftWriteEnd})
+		r.raftWriteEnd = raftWriteEnd
+		r.StatesCh = raftStatesChan
+		go func() {
+			r.raftsync.Run()
+		}()
+	}
 	ctx := r.AnnotateCtx(context.Background())
 	rg, err := raft.NewRawNode(newRaftConfig(
 		ctx,
@@ -375,7 +386,7 @@ func (r *Replica) initRaftGroupRaftMuLockedReplicaMuLocked() error {
 		(*replicaRLockedStoreLiveness)(r),
 		r.store.raftMetrics,
 		r.store.TestingKnobs().RaftTestingKnobs,
-	))
+	), raftWriteEnd)
 	if err != nil {
 		return err
 	}

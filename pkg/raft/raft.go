@@ -31,9 +31,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/raft/confchange"
 	"github.com/cockroachdb/cockroach/pkg/raft/quorum"
 	"github.com/cockroachdb/cockroach/pkg/raft/raftlogger"
+	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	pb "github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/raft/raftstoreliveness"
 	"github.com/cockroachdb/cockroach/pkg/raft/tracker"
+	"github.com/cockroachdb/cockroach/pkg/util/raftconfig"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
 	"golang.org/x/exp/maps"
@@ -253,6 +255,9 @@ type Config struct {
 
 	Metrics      *Metrics
 	TestingKnobs *TestingKnobs
+
+	//channel to sync thread
+	WriteEnd <-chan Notify
 }
 
 func (c *Config) validate() error {
@@ -433,6 +438,32 @@ type raft struct {
 	crdbVersion   clusterversion.Handle
 	metrics       *Metrics
 	testingKnobs  *TestingKnobs
+
+	// SendStates chan Sync_Protocol_States
+}
+
+// func (s *Sync_Protocol_States) GetLastEntryTermIndex() (uint64, uint64) {
+// 	if len(s.Entries) == 0 {
+// 		return 0, 0
+// 	}
+// 	return s.Entries[len(s.Entries)-1].Term, s.Entries[len(s.Entries)-1].Index
+// }
+
+type Notify struct {
+	Term      uint64
+	LastTerm  uint64
+	LastIndex uint64
+	Entries   []raftpb.Entry
+	Snapshot  *raftpb.Snapshot
+	Commit    uint64
+	ByteSize  int64
+}
+
+func (n *Notify) GetLastEntryTermIndex() (uint64, uint64) {
+	if len(n.Entries) == 0 {
+		return 0, 0
+	}
+	return n.Entries[len(n.Entries)-1].Term, n.Entries[len(n.Entries)-1].Index
 }
 
 func newRaft(c *Config) *raft {
@@ -467,6 +498,7 @@ func newRaft(c *Config) *raft {
 		crdbVersion:                 c.CRDBVersion,
 		metrics:                     c.Metrics,
 		testingKnobs:                c.TestingKnobs,
+		// SendStates:                  c.SendStates,
 	}
 	lastID := r.raftLog.lastEntryID()
 
@@ -524,6 +556,23 @@ func newRaft(c *Config) *raft {
 }
 
 func (r *raft) softState() SoftState { return SoftState{RaftState: r.state} }
+
+// todo: this function should be protected in rw lock
+// func (r *raft) Convert_to_protocol_states() Sync_Protocol_States {
+// 	snapshot := pb.Snapshot{}
+// 	if r.raftLog.unstable.snapshot != nil && !r.raftLog.unstable.snapshotInProgress {
+// 		snapshot = *r.raftLog.unstable.snapshot
+// 	}
+// 	result := Sync_Protocol_States{
+// 		Term:     r.Term,
+// 		Commit:   r.raftLog.committed,
+// 		Vote:     uint64(r.Vote),
+// 		Entries:  r.raftLog.nextUnstableEnts(),
+// 		Snapshot: snapshot,
+// 	}
+// 	r.raftLog.acceptUnstable()
+// 	return result
+// }
 
 func (r *raft) hardState() pb.HardState {
 	return pb.HardState{
@@ -635,11 +684,21 @@ func (r *raft) send(m pb.Message) {
 		//
 		// TODO(pav-kv): MsgPreVoteResp does not require sync. Consider sending it
 		// immediately.
-		r.msgsAfterAppend = append(r.msgsAfterAppend, m)
+
+		if raftconfig.AUTO_DECIDING_MESSAGE_SENDING {
+			// Force all messages go into r.msgs.
+			// r.msgsAfterAppend = append(r.msgsAfterAppend, m)
+			r.msgs = append(r.msgs, m)
+			// fmt.Printf("\033[1;31mShould send %+v\033[0m\n", m)
+		} else {
+			r.msgsAfterAppend = append(r.msgsAfterAppend, m)
+			// fmt.Printf("\033[1;31mShould send %+v\033[0m\n", m)
+		}
 	default:
 		if m.To == r.id {
 			r.logger.Panicf("message should not be self-addressed when sending %s", m.Type)
 		}
+		// fmt.Printf("\033[1;32mShould send %+v\033[0m\n", m)
 		r.msgs = append(r.msgs, m)
 	}
 }
@@ -1502,6 +1561,7 @@ func (r *raft) campaign(t CampaignType) {
 		term = r.Term
 	}
 	ids := maps.Keys(r.config.Voters.IDs())
+	fmt.Printf("Campaign starting with type %+v and ids: %+v\n", t, ids)
 	slices.Sort(ids)
 	for _, id := range ids {
 		if id == r.id {
@@ -1539,6 +1599,7 @@ func (r *raft) poll(
 }
 
 func (r *raft) Step(m pb.Message) error {
+	// fmt.Printf("Received %+v\n", m)
 	// Handle the message term, which may result in our stepping down to a follower.
 	switch {
 	case m.Term == 0:

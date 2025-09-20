@@ -110,6 +110,8 @@ go_library(
         "task_pacer.go",
         "testing_knobs.go",
         "ts_maintenance_queue.go",
+        "sync.go",
+        "config.go",
         ":gen-refreshraftreason-stringer",  # keep
     ],
     embed = [":kvserver_go_proto"],
@@ -241,6 +243,7 @@ go_library(
         "//pkg/util/pprofutil",
         "//pkg/util/protoutil",
         "//pkg/util/quotapool",
+        "//pkg/util/raftconfig",
         "//pkg/util/retry",
         "//pkg/util/shuffle",
         "//pkg/util/slidingwindow",

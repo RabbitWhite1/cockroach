@@ -1083,6 +1083,10 @@ type Replica struct {
 	// changes, leaseholder changes, and periodically at the interval of
 	// kv.closed_timestamp.policy_refresh_interval by PolicyRefresher.
 	cachedClosedTimestampPolicy atomic.Pointer[ctpb.RangeClosedTimestampPolicy]
+
+	raftsync     RaftSync
+	StatesCh     chan Sync_Protocol_States
+	raftWriteEnd <-chan raft.Notify
 }
 
 // String returns the string representation of the replica using an
