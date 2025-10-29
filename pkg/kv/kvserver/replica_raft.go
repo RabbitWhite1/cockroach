@@ -962,7 +962,6 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 		unquiesceAndWakeLeader := hasReady || numFlushed > 0 || len(r.mu.proposals) > 0
 		return unquiesceAndWakeLeader, nil
 	})
-
 	r.mu.applyingEntries = !ready.Committed.Empty()
 	pausedFollowers := r.mu.pausedFollowers
 	if shouldResetLastReplicaAdded {
@@ -987,45 +986,6 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 	raftEvent := rac2.RaftEventFromMsgStorageAppendAndMsgApps(
 		rac2ModeForReady, r.ReplicaID(), ready.StorageAppend, ready.Messages,
 		logSnapshot, r.raftMu.msgAppScratchForFlowControl, replicaStateInfoMap)
-	hasResp := false
-hasRespLoop:
-	for _, m := range ready.Messages {
-		switch m.Type {
-		case raftpb.MsgAppResp, raftpb.MsgVoteResp, raftpb.MsgPreVoteResp, raftpb.MsgFortifyLeaderResp:
-			hasResp = true
-			break hasRespLoop
-		}
-	}
-	if raftconfig.AUTO_DECIDING_MESSAGE_SENDING && hasReady {
-		if app := ready.StorageAppend; !app.Empty() || hasResp {
-			// We should only issue presistence if app is not empty.
-			// Another option is sending `app` regardlessly and let save thread decides (more similar to etcd one).
-			// BUT I AM LAZY.
-			// NOTE: Why do we need the responses?
-			// In logstore storeEntriesAndCommitBatch, it uses len(Responses) to decide if it must do sync,
-			// which further prevents calling into OnLogSync that updates repl.flowControlV2.SyncedLogStorage
-			// and AckAppend for updating with Ack.
-			// Note that the key difference is that we do not need to send the `responses` by the OnLogSync,
-			// instead, we just use it to let logstore know it must issue ack.
-			// Sending responses are done together with sending `ready.Messages`.
-			responses := []raftpb.Message{}
-			for _, m := range ready.Messages {
-				switch m.Type {
-				case raftpb.MsgAppResp, raftpb.MsgVoteResp, raftpb.MsgPreVoteResp, raftpb.MsgFortifyLeaderResp:
-					responses = append(responses, m)
-				}
-			}
-			app.Responses = responses
-			r.StatesCh <- Sync_Protocol_States{
-				StorageAppend: app,
-				// InSnap is required because CockroachDB stores snapshot real data in it, not in raftpb.Snapshot.
-				InSnap:    inSnap,
-				RaftEvent: raftEvent,
-				Stats:     &stats,
-			}
-		}
-	}
-
 	// The scratch map is used only while in this Ready handling call. Stop
 	// referencing the entry data from the content of this map, after the call is
 	// done. Not doing so could result in holding entry data for extended periods
@@ -1055,13 +1015,8 @@ hasRespLoop:
 		return stats, nil
 	}
 
-	r.traceMessageSends(ready.Messages, "sending messages")
-	if raftconfig.AUTO_DECIDING_MESSAGE_SENDING {
-		for _, m := range ready.Messages {
-			r.raftsync.Send(m, RAFTSYNC_UNKNOWN)
-			r.sendRaftMessages(ctx, []raftpb.Message{m}, pausedFollowers)
-		}
-	} else {
+	if !raftconfig.AUTO_DECIDING_MESSAGE_SENDING {
+		r.traceMessageSends(ready.Messages, "sending messages")
 		r.sendRaftMessages(ctx, ready.Messages, pausedFollowers)
 	}
 
@@ -1095,8 +1050,8 @@ hasRespLoop:
 	// to peers. However, the process of appending new entries to the raft log
 	// and then applying committed entries to the state machine can take some
 	// time - and these entries are already durably committed. If they have
-	// as possible. To facilitate this, we take a quick pass over the committed
 	// clients waiting on them, we'd like to acknowledge their success as soon
+	// as possible. To facilitate this, we take a quick pass over the committed
 	// entries and acknowledge as many as we can trivially prove will not be
 	// rejected beneath raft.
 	//
@@ -1143,6 +1098,53 @@ hasRespLoop:
 	// Grab the known leaseholder before applying to the state machine.
 	startingLeaseholderID := r.shMu.state.Lease.Replica.ReplicaID
 	refreshReason := noReason
+
+	hasResp := false
+hasRespLoop:
+	for _, m := range ready.Messages {
+		switch m.Type {
+		case raftpb.MsgAppResp, raftpb.MsgVoteResp, raftpb.MsgPreVoteResp, raftpb.MsgFortifyLeaderResp:
+			hasResp = true
+			break hasRespLoop
+		}
+	}
+	if raftconfig.AUTO_DECIDING_MESSAGE_SENDING && hasReady {
+		if app := ready.StorageAppend; !app.Empty() || hasResp {
+			// We should only issue presistence if app is not empty.
+			// Another option is sending `app` regardlessly and let save thread decides (more similar to etcd one).
+			// BUT I AM LAZY.
+			// NOTE: Why do we need the responses?
+			// In logstore storeEntriesAndCommitBatch, it uses len(Responses) to decide if it must do sync,
+			// which further prevents calling into OnLogSync that updates repl.flowControlV2.SyncedLogStorage
+			// and AckAppend for updating with Ack.
+			// Note that the key difference is that we do not need to send the `responses` by the OnLogSync,
+			// instead, we just use it to let logstore know it must issue ack.
+			// Sending responses are done together with sending `ready.Messages`.
+			responses := []raftpb.Message{}
+			for _, m := range ready.Messages {
+				switch m.Type {
+				case raftpb.MsgAppResp, raftpb.MsgVoteResp, raftpb.MsgPreVoteResp, raftpb.MsgFortifyLeaderResp:
+					responses = append(responses, m)
+				}
+			}
+			app.Responses = responses
+			r.StatesCh <- Sync_Protocol_States{
+				StorageAppend: app,
+				// InSnap is required because CockroachDB stores snapshot real data in it, not in raftpb.Snapshot.
+				InSnap:    inSnap,
+				RaftEvent: raftEvent,
+				Stats:     &stats,
+			}
+		}
+	}
+
+	if raftconfig.AUTO_DECIDING_MESSAGE_SENDING {
+		for _, m := range ready.Messages {
+			r.raftsync.Send(m, RAFTSYNC_UNKNOWN)
+		}
+		r.traceMessageSends(ready.Messages, "sending messages")
+		r.sendRaftMessages(ctx, ready.Messages, pausedFollowers)
+	}
 
 	state := r.asLogStorage().stateRaftMuLocked()
 	if app := ready.StorageAppend; !app.Empty() || hasResp {

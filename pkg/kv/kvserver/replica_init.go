@@ -372,7 +372,7 @@ func (r *Replica) initRaftGroupRaftMuLockedReplicaMuLocked() error {
 	raftStatesChan := make(chan Sync_Protocol_States, 1)
 	raftWriteEnd := make(chan raft.Notify, 1)
 	if raftconfig.AUTO_DECIDING_MESSAGE_SENDING {
-		r.raftsync.Init(r, raftStatesChan, []chan raft.Notify{raftWriteEnd})
+		r.raftsync.Init(r, raftStatesChan, []chan raft.Notify{raftWriteEnd}, r.RangeID)
 		r.raftWriteEnd = raftWriteEnd
 		r.StatesCh = raftStatesChan
 		go func() {
@@ -391,7 +391,7 @@ func (r *Replica) initRaftGroupRaftMuLockedReplicaMuLocked() error {
 		(*replicaRLockedStoreLiveness)(r),
 		r.store.raftMetrics,
 		r.store.TestingKnobs().RaftTestingKnobs,
-	), raftWriteEnd)
+	), raftWriteEnd, int64(r.RangeID))
 	if err != nil {
 		return err
 	}

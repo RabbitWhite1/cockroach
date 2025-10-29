@@ -10,6 +10,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/rac2"
 	"github.com/cockroachdb/cockroach/pkg/raft"
 	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 )
 
 const RAFTSYNC_UNKNOWN = math.MaxUint64
@@ -40,6 +41,8 @@ type RaftSync struct {
 	writeEnd     []chan raft.Notify
 	allcounter   atomic.Uint64
 	savedcounter atomic.Uint64
+
+	RangeID roachpb.RangeID
 }
 
 // IsEmptySnap returns true if the given Snapshot is empty.
@@ -55,7 +58,7 @@ func (s *Sync_Protocol_States) GetLastEntryTermIndex() (uint64, uint64) {
 	return Entries[len(Entries)-1].Term, Entries[len(Entries)-1].Index
 }
 
-func (s *RaftSync) Init(st *Replica, statesCh <-chan Sync_Protocol_States, writeEnd []chan raft.Notify) {
+func (s *RaftSync) Init(st *Replica, statesCh <-chan Sync_Protocol_States, writeEnd []chan raft.Notify, RangeID roachpb.RangeID) {
 	s.storage = st
 	s.StatesCh = statesCh
 	s.writeEnd = writeEnd
@@ -63,6 +66,7 @@ func (s *RaftSync) Init(st *Replica, statesCh <-chan Sync_Protocol_States, write
 	s.savedcounter.Store(0)
 	saved_states := Sync_Protocol_States{}
 	s.saved_states.Store(&saved_states)
+	s.RangeID = RangeID
 }
 
 func (s *RaftSync) AddCounter() {

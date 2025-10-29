@@ -368,6 +368,8 @@ func (sm *replicaStateMachine) maybeApplyConfChange(ctx context.Context, cmd *re
 	if cc == nil {
 		return nil
 	}
+	// ccv1, ok := cc.AsV1()
+	// fmt.Printf("\033[1;33mRangeID=%d confchange(%t): %s, %d, %d\033[0m\n", sm.r.RangeID, ok, ccv1.Type.String(), ccv1.NodeID, ccv1.ID)
 	sm.applyStats.numConfChangeEntries++
 	if cmd.Rejected() {
 		// The command was rejected. There is no need to report a ConfChange
