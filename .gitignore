@@ -69,3 +69,4 @@ pkg/testutils/serverutils/*_generated.go
 
 node*/**
 tmp*
+/*.ipynb

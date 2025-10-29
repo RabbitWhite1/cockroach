@@ -440,6 +440,7 @@ type raft struct {
 	testingKnobs  *TestingKnobs
 
 	// SendStates chan Sync_Protocol_States
+	RangeID int64
 }
 
 // func (s *Sync_Protocol_States) GetLastEntryTermIndex() (uint64, uint64) {
@@ -1543,6 +1544,9 @@ func (r *raft) hasUnappliedConfChanges() bool {
 // campaign transitions the raft instance to candidate state. This must only be
 // called after verifying that this is a legitimate transition.
 func (r *raft) campaign(t CampaignType) {
+	if r.RangeID == 78 {
+		fmt.Printf("Try Campaigning, %+v\n", t)
+	}
 	if !r.promotable() {
 		// This path should not be hit (callers are supposed to check), but
 		// better safe than sorry.
@@ -1561,7 +1565,9 @@ func (r *raft) campaign(t CampaignType) {
 		term = r.Term
 	}
 	ids := maps.Keys(r.config.Voters.IDs())
-	fmt.Printf("Campaign starting with type %+v and ids: %+v\n", t, ids)
+	if r.RangeID == 78 {
+		fmt.Printf("Voter Ids: %+v, learners: %+v\n", ids, r.config.Learners)
+	}
 	slices.Sort(ids)
 	for _, id := range ids {
 		if id == r.id {

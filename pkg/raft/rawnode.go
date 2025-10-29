@@ -47,9 +47,10 @@ type RawNode struct {
 // recommended that instead of calling Bootstrap, applications bootstrap their
 // state manually by setting up a Storage that has a first index > 1 and which
 // stores the desired ConfState as its InitialState.
-func NewRawNode(config *Config, raftNotifyCh <-chan Notify) (*RawNode, error) {
+func NewRawNode(config *Config, raftNotifyCh <-chan Notify, RangeID int64) (*RawNode, error) {
 	config.WriteEnd = raftNotifyCh
 	r := newRaft(config)
+	r.RangeID = RangeID
 	rn := &RawNode{
 		raft: r,
 	}

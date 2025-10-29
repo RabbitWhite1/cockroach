@@ -177,7 +177,7 @@ func can_send(saved_states Sync_Protocol_States, m interface{}) bool {
 			// 	return true
 			// }
 		}
-		if msg.Type == raftpb.MsgAppResp {
+		if msg.Type == raftpb.MsgAppResp || msg.Type == raftpb.MsgFortifyLeaderResp {
 			// fmt.Printf("sync thread: can send check message is: %+v, saved_states is: %+v\n", msg, saved_states)
 			if msg.Reject {
 				return true
